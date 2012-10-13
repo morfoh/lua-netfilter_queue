@@ -159,7 +159,7 @@ object "nfq_queue" {
 	method "set_verdict" {
 		var_in { "const unsigned char *", "buf", is_optional = true, default = NULL },
 		c_call "int" "nfq_set_verdict" {
-			"nfq_queue", "this<1",
+			"nfq_queue *", "this<1",
 			"uint32_t", "id<2",
 			"uint32_t", "verdict<3",
 			"uint32_t", "data_len<4",
@@ -171,7 +171,7 @@ object "nfq_queue" {
 	method "set_verdict2" {
 		var_in { "const unsigned char *", "buf", is_optional = true, default = NULL },
 		c_call "int" "nfq_set_verdict2" {
-			"nfq_queue", "this<1",
+			"nfq_queue *", "this<1",
 			"uint32_t", "id<2",
 			"uint32_t", "verdict<3",
 			"uint32_t", "mark<4",
