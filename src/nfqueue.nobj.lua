@@ -23,6 +23,8 @@ basetype "useconds_t"		"integer" "0"
 
 -- typedefs
 local typedefs = [[
+typedef struct nlif_handle nlif_handle;
+
 typedef struct nfq_handle nfq_handle;
 typedef struct nfq_q_handle nfq_queue;
 typedef struct nfgenmsg nfgenmsg;
@@ -58,6 +60,8 @@ export_definitions {
 "NF_STOP",
 "NF_MAX_VERDICT",
 }
+
+local IFNAMSIZ = 64
 
 --
 -- nfq handle
@@ -242,9 +246,21 @@ object "nfq_data" {
 		c_method_call "uint32_t" "nfq_get_indev" {}
 	},
 
+	-- get the name of the interface the packet was received through
+	method "get_indev_name" {
+		var_out{ "char *", "name", has_length = false, need_buffer = IFNAMSIZ },
+		c_call "err_rc" "nfq_get_indev_name" { "nlif_handle *", "handle", "nfq_data *", "this", "char *", "name"},
+	},
+
 	-- get the physical interface that the packet was received
 	method "get_physindev" {
 		c_method_call "uint32_t" "nfq_get_physindev" {}
+	},
+
+	-- get the name of the physical interface the packet was received through
+	method "get_physindev_name" {
+		var_out{ "char *", "name", has_length = false, need_buffer = IFNAMSIZ },
+		c_call "err_rc" "nfq_get_physindev_name" { "nlif_handle *", "handle", "nfq_data *", "this", "char *", "name"},
 	},
 
 	-- gets the interface that the packet will be routed out
@@ -252,9 +268,21 @@ object "nfq_data" {
 		c_method_call "uint32_t" "nfq_get_outdev" {}
 	},
 
+	-- get the name of the physical interface the packet will be sent to
+	method "get_outdev_name" {
+		var_out{ "char *", "name", has_length = false, need_buffer = IFNAMSIZ },
+		c_call "err_rc" "nfq_get_outdev_name" { "nlif_handle *", "handle", "nfq_data *", "this", "char *", "name"},
+	},
+
 	-- get the physical interface that the packet output
 	method "get_physoutdev" {
 		c_method_call "uint32_t" "nfq_get_physoutdev" {}
+	},
+
+	-- get the name of the interface the packet will be sent to
+	method "get_physoutdev_name" {
+		var_out{ "char *", "name", has_length = false, need_buffer = IFNAMSIZ },
+		c_call "err_rc" "nfq_get_physoutdev_name" { "nlif_handle *", "handle", "nfq_data *", "this", "char *", "name"},
 	},
 }
 

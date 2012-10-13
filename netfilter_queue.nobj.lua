@@ -9,6 +9,9 @@ luajit_ffi = true,
 -- load NETFILTER_QUEUE shared library.
 ffi_load"netfilter_queue",
 
+-- import nlif_handle from nfnetlink module.
+import_object "nfnetlink" "nlif_handle",
+
 sys_include "unistd.h",
 sys_include "netinet/in.h",
 sys_include "linux/netfilter.h",
