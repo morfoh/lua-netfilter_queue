@@ -70,7 +70,7 @@ end
 local function cb(qh, nfmsg, nfad, data)
 	-- print("nfq_callback():", qh, nfmsg, nfad, data)
 	local id = print_pkt(nfad)
-	return qh:set_verdict(id, nfq.NF_ACCEPT, 0)
+	return qh:set_verdict(id, nfq.NF_ACCEPT)
 end
 
 

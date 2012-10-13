@@ -157,26 +157,24 @@ object "nfq_queue" {
 
 	-- issue a verdict on a packet
 	method "set_verdict" {
-		var_in { "const unsigned char *", "buf", is_optional = true, default = NULL },
-		c_call "err_rc" "nfq_set_verdict" {
-			"nfq_queue *", "this<1",
-			"uint32_t", "id<2",
-			"uint32_t", "verdict<3",
-			"uint32_t", "data_len<4",
-			"const unsigned char *", "buf<5"
+		var_in { "uint32_t", "id"},
+		var_in { "uint32_t", "verdict"},
+		var_in {"const unsigned char *", "buf?"},
+		c_method_call "err_rc" "nfq_set_verdict" {
+			"uint32_t", "id", "uint32_t", "verdict",
+			"uint32_t", "#buf", "const unsigned char *", "buf",
 		},
 	},
 
 	-- issue a verdict on a packet and set a mark
 	method "set_verdict2" {
-		var_in { "const unsigned char *", "buf", is_optional = true, default = NULL },
-		c_call "err_rc" "nfq_set_verdict2" {
-			"nfq_queue *", "this<1",
-			"uint32_t", "id<2",
-			"uint32_t", "verdict<3",
-			"uint32_t", "mark<4",
-			"uint32_t", "data_len<5",
-			"const unsigned char *", "buf<6"
+		var_in { "uint32_t", "id"},
+		var_in { "uint32_t", "verdict"},
+		var_in { "uint32_t", "mark"},
+		var_in {"const unsigned char *", "buf?"},
+		c_method_call "err_rc" "nfq_set_verdict2" {
+			"uint32_t", "id", "uint32_t", "verdict", "uint32_t", "mark",
+			"uint32_t", "#buf", "const unsigned char *", "buf",
 		},
 	},
 }
