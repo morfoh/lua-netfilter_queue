@@ -15,6 +15,7 @@ sys_include "linux/netfilter.h",
 sys_include "libnetfilter_queue/libnetfilter_queue.h",
 
 subfiles {
+"src/error.nobj.lua",
 "src/nfqueue.nobj.lua",
 },
 }

@@ -142,23 +142,23 @@ object "nfq_queue" {
 
 	-- destroy a queue handle
 	destructor "destroy_queue" {
-		c_method_call "int" "nfq_destroy_queue" {}
+		c_method_call "err_rc" "nfq_destroy_queue" {}
 	},
 
 	-- set the amount of packet data that nfqueue copies to userspace
 	method "set_mode" {
-		c_method_call "int" "nfq_set_mode" { "uint8_t", "mode", "uint32_t", "range" }
+		c_method_call "err_rc" "nfq_set_mode" { "uint8_t", "mode", "uint32_t", "range" }
 	},
 
 	-- set kernel queue maximum length parameter
 	method "set_queue_maxlen" {
-		c_method_call "int" "nfq_set_queue_maxlen" { "uint32_t", "queuelen" }
+		c_method_call "err_rc" "nfq_set_queue_maxlen" { "uint32_t", "queuelen" }
 	},
 
 	-- issue a verdict on a packet
 	method "set_verdict" {
 		var_in { "const unsigned char *", "buf", is_optional = true, default = NULL },
-		c_call "int" "nfq_set_verdict" {
+		c_call "err_rc" "nfq_set_verdict" {
 			"nfq_queue *", "this<1",
 			"uint32_t", "id<2",
 			"uint32_t", "verdict<3",
@@ -170,7 +170,7 @@ object "nfq_queue" {
 	-- issue a verdict on a packet and set a mark
 	method "set_verdict2" {
 		var_in { "const unsigned char *", "buf", is_optional = true, default = NULL },
-		c_call "int" "nfq_set_verdict2" {
+		c_call "err_rc" "nfq_set_verdict2" {
 			"nfq_queue *", "this<1",
 			"uint32_t", "id<2",
 			"uint32_t", "verdict<3",
