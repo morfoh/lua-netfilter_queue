@@ -130,6 +130,7 @@ typedef void (*dyn_caster_t)(void **obj, obj_type **type);
 
 #define OBJ_TYPE_FLAG_WEAK_REF (1<<0)
 #define OBJ_TYPE_SIMPLE (1<<1)
+#define OBJ_TYPE_IMPORT (1<<2)
 struct obj_type {
 	dyn_caster_t    dcaster;  /**< caster to support casting to sub-objects. */
 	int32_t         id;       /**< type's id. */
@@ -227,6 +228,8 @@ typedef struct ffi_export_symbol {
 } ffi_export_symbol;
 #endif
 
+typedef struct nlif_handle nlif_handle;
+
 typedef struct nfq_handle nfq_handle;
 typedef struct nfq_q_handle nfq_queue;
 typedef struct nfgenmsg nfgenmsg;
@@ -235,22 +238,27 @@ typedef struct nfqnl_msg_packet_hw nfqnl_msg_packet_hw;
 
 
 
+typedef int err_rc;
+
 static int nfq_queue_func_cb(nfq_queue * qh, nfgenmsg * nfmsg, nfq_data * nfad, void * data);
 
 
 static obj_type obj_types[] = {
-#define obj_type_id_nfq_handle 0
+#define obj_type_id_nlif_handle 0
+#define obj_type_nlif_handle (obj_types[obj_type_id_nlif_handle])
+  { NULL, 0, OBJ_TYPE_IMPORT, "nlif_handle" },
+#define obj_type_id_nfq_handle 1
 #define obj_type_nfq_handle (obj_types[obj_type_id_nfq_handle])
-  { NULL, 0, OBJ_TYPE_FLAG_WEAK_REF, "nfq_handle" },
-#define obj_type_id_nfq_queue 1
+  { NULL, 1, OBJ_TYPE_FLAG_WEAK_REF, "nfq_handle" },
+#define obj_type_id_nfq_queue 2
 #define obj_type_nfq_queue (obj_types[obj_type_id_nfq_queue])
-  { NULL, 1, OBJ_TYPE_FLAG_WEAK_REF, "nfq_queue" },
-#define obj_type_id_nfq_data 2
+  { NULL, 2, OBJ_TYPE_FLAG_WEAK_REF, "nfq_queue" },
+#define obj_type_id_nfq_data 3
 #define obj_type_nfq_data (obj_types[obj_type_id_nfq_data])
-  { NULL, 2, OBJ_TYPE_FLAG_WEAK_REF, "nfq_data" },
-#define obj_type_id_nfqnl_msg_packet_hw 3
+  { NULL, 3, OBJ_TYPE_FLAG_WEAK_REF, "nfq_data" },
+#define obj_type_id_nfqnl_msg_packet_hw 4
 #define obj_type_nfqnl_msg_packet_hw (obj_types[obj_type_id_nfqnl_msg_packet_hw])
-  { NULL, 3, OBJ_TYPE_FLAG_WEAK_REF, "nfqnl_msg_packet_hw" },
+  { NULL, 4, OBJ_TYPE_FLAG_WEAK_REF, "nfqnl_msg_packet_hw" },
   {NULL, -1, 0, NULL},
 };
 
@@ -558,6 +566,48 @@ static void obj_type_register_implements(lua_State *L, const reg_impl *impls) {
 #define OBJ_DATA_HIDDEN_METATABLE 1
 #endif
 
+static FUNC_UNUSED int obj_import_external_type(lua_State *L, obj_type *type) {
+	/* find the external type's metatable using it's name. */
+	lua_pushstring(L, type->name);
+	lua_rawget(L, LUA_REGISTRYINDEX); /* external type's metatable. */
+	if(!lua_isnil(L, -1)) {
+		/* found it.  Now we will map our 'type' pointer to the metatable. */
+		/* REGISTERY[lightuserdata<type>] = REGISTERY[type->name] */
+		lua_pushlightuserdata(L, type); /* use our 'type' pointer as lookup key. */
+		lua_pushvalue(L, -2); /* dup. type's metatable. */
+		lua_rawset(L, LUA_REGISTRYINDEX); /* save external type's metatable. */
+		/* NOTE: top of Lua stack still has the type's metatable. */
+		return 1;
+	} else {
+		lua_pop(L, 1); /* pop nil. */
+	}
+	return 0;
+}
+
+static FUNC_UNUSED int obj_import_external_ffi_type(lua_State *L, obj_type *type) {
+	/* find the external type's metatable using it's name. */
+	lua_pushstring(L, type->name);
+	lua_rawget(L, LUA_REGISTRYINDEX); /* external type's metatable. */
+	if(!lua_isnil(L, -1)) {
+		/* found it.  Now we will map our 'type' pointer to the C check function. */
+		/* _priv_table[lightuserdata<type>] = REGISTERY[type->name].c_check */
+		lua_getfield(L, -1, "c_check");
+		lua_remove(L, -2); /* remove metatable. */
+		if(lua_isfunction(L, -1)) {
+			lua_pushlightuserdata(L, type); /* use our 'type' pointer as lookup key. */
+			lua_pushvalue(L, -2); /* dup. check function */
+			lua_rawset(L, -4); /* save check function to module's private table. */
+			/* NOTE: top of Lua stack still has the type's C check function. */
+			return 1;
+		} else {
+			lua_pop(L, 1); /* pop non function value. */
+		}
+	} else {
+		lua_pop(L, 1); /* pop nil. */
+	}
+	return 0;
+}
+
 static FUNC_UNUSED obj_udata *obj_udata_toobj(lua_State *L, int _index) {
 	obj_udata *ud;
 	size_t len;
@@ -581,10 +631,23 @@ static FUNC_UNUSED int obj_udata_is_compatible(lua_State *L, obj_udata *ud, void
 	obj_type *ud_type;
 	lua_pushlightuserdata(L, type);
 	lua_rawget(L, LUA_REGISTRYINDEX); /* type's metatable. */
+recheck_metatable:
 	if(lua_rawequal(L, -1, -2)) {
 		*obj = ud->obj;
 		/* same type no casting needed. */
 		return 1;
+	} else if(lua_isnil(L, -1)) {
+		lua_pop(L, 1); /* pop nil. */
+		if((type->flags & OBJ_TYPE_IMPORT) == 0) {
+			/* can't resolve internal type. */
+			luaL_error(L, "Unknown object type(id=%d, name=%s)", type->id, type->name);
+		}
+		/* try to import external type. */
+		if(obj_import_external_type(L, type)) {
+			/* imported type, re-try metatable check. */
+			goto recheck_metatable;
+		}
+		/* External type not yet available, so the object can't be compatible. */
 	} else {
 		/* Different types see if we can cast to the required type. */
 		lua_rawgeti(L, -2, type->id);
@@ -648,6 +711,7 @@ static FUNC_UNUSED obj_udata *obj_udata_luacheck_internal(lua_State *L, int _ind
 
 		/* check for function. */
 		if(!lua_isnil(L, -1)) {
+got_check_func:
 			/* pass cdata value to type checking function. */
 			lua_pushvalue(L, _index);
 			lua_call(L, 1, 1);
@@ -659,7 +723,15 @@ static FUNC_UNUSED obj_udata *obj_udata_luacheck_internal(lua_State *L, int _ind
 			}
 			lua_pop(L, 2);
 		} else {
-			lua_pop(L, 1);
+			lua_pop(L, 1); /* pop nil. */
+			if(type->flags & OBJ_TYPE_IMPORT) {
+				/* try to import external ffi type. */
+				if(obj_import_external_ffi_type(L, type)) {
+					/* imported type. */
+					goto got_check_func;
+				}
+				/* External type not yet available, so the object can't be compatible. */
+			}
 		}
 	}
 	if(not_delete) {
@@ -861,9 +933,23 @@ static FUNC_UNUSED void * obj_simple_udata_luacheck(lua_State *L, int _index, ob
 		if(lua_getmetatable(L, _index)) {
 			lua_pushlightuserdata(L, type);
 			lua_rawget(L, LUA_REGISTRYINDEX); /* type's metatable. */
+recheck_metatable:
 			if(lua_rawequal(L, -1, -2)) {
 				lua_pop(L, 2); /* pop both metatables. */
 				return ud;
+			} else if(lua_isnil(L, -1)) {
+				lua_pop(L, 1); /* pop nil. */
+				if((type->flags & OBJ_TYPE_IMPORT) == 0) {
+					/* can't resolve internal type. */
+					luaL_error(L, "Unknown object type(id=%d, name=%s)", type->id, type->name);
+				}
+				/* try to import external type. */
+				if(obj_import_external_type(L, type)) {
+					/* imported type, re-try metatable check. */
+					goto recheck_metatable;
+				}
+				/* External type not yet available, so the object can't be compatible. */
+				return 0;
 			}
 		}
 	} else if(!lua_isnoneornil(L, _index)) {
@@ -877,6 +963,7 @@ static FUNC_UNUSED void * obj_simple_udata_luacheck(lua_State *L, int _index, ob
 
 		/* check for function. */
 		if(!lua_isnil(L, -1)) {
+got_check_func:
 			/* pass cdata value to type checking function. */
 			lua_pushvalue(L, _index);
 			lua_call(L, 1, 1);
@@ -884,6 +971,15 @@ static FUNC_UNUSED void * obj_simple_udata_luacheck(lua_State *L, int _index, ob
 				/* valid type get pointer from cdata. */
 				lua_pop(L, 2);
 				return (void *)lua_topointer(L, _index);
+			}
+		} else {
+			if(type->flags & OBJ_TYPE_IMPORT) {
+				/* try to import external ffi type. */
+				if(obj_import_external_ffi_type(L, type)) {
+					/* imported type. */
+					goto got_check_func;
+				}
+				/* External type not yet available, so the object can't be compatible. */
 			}
 		}
 	}
@@ -1229,6 +1325,11 @@ static char *obj_interfaces[] = {
 
 
 
+#define obj_type_nlif_handle_check(L, _index) \
+	obj_udata_luacheck(L, _index, &(obj_type_nlif_handle))
+#define obj_type_nlif_handle_optional(L, _index) \
+	obj_udata_luaoptional(L, _index, &(obj_type_nlif_handle))
+
 #define obj_type_nfq_handle_check(L, _index) \
 	obj_udata_luacheck(L, _index, &(obj_type_nfq_handle))
 #define obj_type_nfq_handle_optional(L, _index) \
@@ -1438,6 +1539,8 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "]])\n"
 "\n"
 "ffi.cdef[[\n"
+"typedef int err_rc;\n"
+"\n"
 "typedef struct nfq_handle nfq_handle;\n"
 "typedef struct nfq_queue nfq_queue;\n"
 "typedef struct nfq_data nfq_data;\n"
@@ -1446,6 +1549,8 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "]]\n"
 "\n"
 "ffi.cdef[[\n"
+"typedef struct nlif_handle nlif_handle;\n"
+"\n"
 "typedef struct nfq_handle nfq_handle;\n"
 "typedef struct nfq_q_handle nfq_queue;\n"
 "typedef struct nfgenmsg nfgenmsg;\n"
@@ -1465,25 +1570,33 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "typedef int (*NFQCallback)(nfq_queue * qh, nfgenmsg * nfmsg, nfq_data * nfad, void * data);\n"
 "nfq_queue * nfq_create_queue(nfq_handle *, uint16_t, NFQCallback, void *);\n"
 "\n"
-"int nfq_destroy_queue(nfq_queue *);\n"
+"err_rc nfq_destroy_queue(nfq_queue *);\n"
 "\n"
-"int nfq_set_mode(nfq_queue *, uint8_t, uint32_t);\n"
+"err_rc nfq_set_mode(nfq_queue *, uint8_t, uint32_t);\n"
 "\n"
-"int nfq_set_queue_maxlen(nfq_queue *, uint32_t);\n"
+"err_rc nfq_set_queue_maxlen(nfq_queue *, uint32_t);\n"
 "\n"
-"int nfq_set_verdict(nfq_queue, uint32_t, uint32_t, uint32_t, const unsigned char *);\n"
+"err_rc nfq_set_verdict(nfq_queue *, uint32_t, uint32_t, uint32_t, const unsigned char *);\n"
 "\n"
-"int nfq_set_verdict2(nfq_queue, uint32_t, uint32_t, uint32_t, uint32_t, const unsigned char *);\n"
+"err_rc nfq_set_verdict2(nfq_queue *, uint32_t, uint32_t, uint32_t, uint32_t, const unsigned char *);\n"
 "\n"
 "uint32_t nfq_get_nfmark(nfq_data *);\n"
 "\n"
 "uint32_t nfq_get_indev(nfq_data *);\n"
 "\n"
+"err_rc nfq_get_indev_name(nlif_handle *, nfq_data *, char *);\n"
+"\n"
 "uint32_t nfq_get_physindev(nfq_data *);\n"
+"\n"
+"err_rc nfq_get_physindev_name(nlif_handle *, nfq_data *, char *);\n"
 "\n"
 "uint32_t nfq_get_outdev(nfq_data *);\n"
 "\n"
+"err_rc nfq_get_outdev_name(nlif_handle *, nfq_data *, char *);\n"
+"\n"
 "uint32_t nfq_get_physoutdev(nfq_data *);\n"
+"\n"
+"err_rc nfq_get_physoutdev_name(nlif_handle *, nfq_data *, char *);\n"
 "\n"
 "\n"
 "]]\n"
@@ -1607,6 +1720,19 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "end\n"
 "\n"
 "\n"
+"local function obj_type_nlif_handle_check(obj)\n"
+"	-- try to import FFI check function from external module.\n"
+"	local mt = reg_table['nlif_handle']\n"
+"	if mt then\n"
+"		local ffi_check = mt.ffi_check\n"
+"		if ffi_check then\n"
+"			obj_type_nlif_handle_check = ffi_check\n"
+"			return ffi_check(obj)\n"
+"		end\n"
+"	end\n"
+"	return error(\"Expected 'nlif_handle'\", 2)\n"
+"end\n"
+"\n"
 "local obj_type_nfq_handle_check\n"
 "local obj_type_nfq_handle_delete\n"
 "local obj_type_nfq_handle_push\n"
@@ -1659,6 +1785,9 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "		return obj_type_nfq_handle_push(ffi.cast(obj_ctype,ptr), flags)\n"
 "	end\n"
 "\n"
+"	-- export check functions for use in other modules.\n"
+"	obj_mt.c_check = obj_type_nfq_handle_check\n"
+"	obj_mt.ffi_check = obj_type_nfq_handle_check\n"
 "end\n"
 "\n"
 "\n"
@@ -1714,6 +1843,9 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "		return obj_type_nfq_queue_push(ffi.cast(obj_ctype,ptr), flags)\n"
 "	end\n"
 "\n"
+"	-- export check functions for use in other modules.\n"
+"	obj_mt.c_check = obj_type_nfq_queue_check\n"
+"	obj_mt.ffi_check = obj_type_nfq_queue_check\n"
 "end\n"
 "\n"
 "\n"
@@ -1769,6 +1901,9 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "		return obj_type_nfq_data_push(ffi.cast(obj_ctype,ptr), flags)\n"
 "	end\n"
 "\n"
+"	-- export check functions for use in other modules.\n"
+"	obj_mt.c_check = obj_type_nfq_data_check\n"
+"	obj_mt.ffi_check = obj_type_nfq_data_check\n"
 "end\n"
 "\n"
 "\n"
@@ -1776,7 +1911,7 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "local obj_type_nfqnl_msg_packet_hw_delete\n"
 "local obj_type_nfqnl_msg_packet_hw_push\n"
 "\n"
-"do\n"
+"do\n", /* ----- CUT ----- */
 "	local obj_mt, obj_type, obj_ctype = obj_register_ctype(\"nfqnl_msg_packet_hw\", \"nfqnl_msg_packet_hw *\")\n"
 "\n"
 "	function obj_type_nfqnl_msg_packet_hw_check(ptr)\n"
@@ -1813,7 +1948,7 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "		return ptr\n"
 "	end\n"
 "\n"
-"	function obj_mt:__tostring()\n", /* ----- CUT ----- */
+"	function obj_mt:__tostring()\n"
 "		return sformat(\"nfqnl_msg_packet_hw: %p, flags=%d\", self, nobj_obj_flags[obj_ptr_to_id(self)] or 0)\n"
 "	end\n"
 "\n"
@@ -1824,6 +1959,9 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "		return obj_type_nfqnl_msg_packet_hw_push(ffi.cast(obj_ctype,ptr), flags)\n"
 "	end\n"
 "\n"
+"	-- export check functions for use in other modules.\n"
+"	obj_mt.c_check = obj_type_nfqnl_msg_packet_hw_check\n"
+"	obj_mt.ffi_check = obj_type_nfqnl_msg_packet_hw_check\n"
 "end\n"
 "\n"
 "\n"
@@ -1893,8 +2031,8 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "  local wrap = nobj_callback_states[obj_ptr_to_id(data)]\n"
 "  local status, ret = pcall(wrap.func, obj_type_nfq_queue_push(qh, 0), nfmsg, obj_type_nfq_data_push(nfad, 0))\n"
 "  if not status then\n"
-"ret = -1;\n"
 "    print(\"CALLBACK Error:\", ret)\n"
+"ret = -1;\n"
 "    return ret\n"
 "  end\n"
 "  ret = ret or 0\n"
@@ -1926,11 +2064,15 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "function _meth.nfq_queue.destroy_queue(self)\n"
 "  local self,this_flags = obj_type_nfq_queue_delete(self)\n"
 "  if not self then return end\n"
-"  local rc_nfq_destroy_queue = 0\n"
+"  local rc_nfq_destroy_queue\n"
 "  local id = obj_ptr_to_id(self)\n"
 "  rc_nfq_destroy_queue = C.nfq_destroy_queue(self)\n"
+"  -- check for error.\n"
+"  if (-1 == rc_nfq_destroy_queue) then\n"
+"    return nil\n"
+"  end\n"
 "  nobj_callback_states[id] = nil\n"
-"  return rc_nfq_destroy_queue\n"
+"  return \n"
 "end\n"
 "_priv.nfq_queue.__gc = _meth.nfq_queue.destroy_queue\n"
 "\n"
@@ -1939,45 +2081,59 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "  \n"
 "  \n"
 "  \n"
-"  local rc_nfq_set_mode = 0\n"
+"  local rc_nfq_set_mode\n"
 "  rc_nfq_set_mode = C.nfq_set_mode(self, mode, range)\n"
-"  return rc_nfq_set_mode\n"
+"  -- check for error.\n"
+"  if (-1 == rc_nfq_set_mode) then\n"
+"    return nil\n"
+"  end\n"
+"  return \n"
 "end\n"
 "\n"
 "-- method: set_queue_maxlen\n"
 "function _meth.nfq_queue.set_queue_maxlen(self, queuelen)\n"
 "  \n"
 "  \n"
-"  local rc_nfq_set_queue_maxlen = 0\n"
+"  local rc_nfq_set_queue_maxlen\n"
 "  rc_nfq_set_queue_maxlen = C.nfq_set_queue_maxlen(self, queuelen)\n"
-"  return rc_nfq_set_queue_maxlen\n"
+"  -- check for error.\n"
+"  if (-1 == rc_nfq_set_queue_maxlen) then\n"
+"    return nil\n"
+"  end\n"
+"  return \n"
 "end\n"
 "\n"
 "-- method: set_verdict\n"
-"function _meth.nfq_queue.set_verdict(self, id, verdict, data_len, buf)\n"
-"  \n"
+"function _meth.nfq_queue.set_verdict(self, id, verdict, buf)\n"
 "  \n"
 "  \n"
 "  \n"
 "  buf = tostring(buf)\n"
 "  local buf_len = buf and #buf or 0\n"
-"  local rc_nfq_set_verdict = 0\n"
-"  rc_nfq_set_verdict = C.nfq_set_verdict(self, id, verdict, data_len, buf)\n"
-"  return rc_nfq_set_verdict\n"
+"  local rc_nfq_set_verdict\n"
+"  rc_nfq_set_verdict = C.nfq_set_verdict(self, id, verdict, buf_len, buf)\n"
+"  -- check for error.\n"
+"  if (-1 == rc_nfq_set_verdict) then\n"
+"    return nil\n"
+"  end\n"
+"  return \n"
 "end\n"
 "\n"
 "-- method: set_verdict2\n"
-"function _meth.nfq_queue.set_verdict2(self, id, verdict, mark, data_len, buf)\n"
-"  \n"
+"function _meth.nfq_queue.set_verdict2(self, id, verdict, mark, buf)\n"
 "  \n"
 "  \n"
 "  \n"
 "  \n"
 "  buf = tostring(buf)\n"
 "  local buf_len = buf and #buf or 0\n"
-"  local rc_nfq_set_verdict2 = 0\n"
-"  rc_nfq_set_verdict2 = C.nfq_set_verdict2(self, id, verdict, mark, data_len, buf)\n"
-"  return rc_nfq_set_verdict2\n"
+"  local rc_nfq_set_verdict2\n"
+"  rc_nfq_set_verdict2 = C.nfq_set_verdict2(self, id, verdict, mark, buf_len, buf)\n"
+"  -- check for error.\n"
+"  if (-1 == rc_nfq_set_verdict2) then\n"
+"    return nil\n"
+"  end\n"
+"  return \n"
 "end\n"
 "\n"
 "_push.nfq_queue = obj_type_nfq_queue_push\n"
@@ -2002,12 +2158,40 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "  return rc_nfq_get_indev\n"
 "end\n"
 "\n"
+"-- method: get_indev_name\n"
+"function _meth.nfq_data.get_indev_name(self, handle)\n"
+"  \n"
+"  handle = obj_type_nlif_handle_check(handle)\n"
+"  local name_len = 63\n"
+"  local name = ffi.new(\"char[?]\", 64)\n"
+"  local rc_nfq_get_indev_name\n"
+"  rc_nfq_get_indev_name = C.nfq_get_indev_name(handle, self, name)\n"
+"  if (-1 == rc_nfq_get_indev_name) then\n"
+"    return nil\n"
+"  end\n"
+"  return ffi_string(name)\n"
+"end\n"
+"\n"
 "-- method: get_physindev\n"
 "function _meth.nfq_data.get_physindev(self)\n"
 "  \n"
 "  local rc_nfq_get_physindev = 0\n"
 "  rc_nfq_get_physindev = C.nfq_get_physindev(self)\n"
 "  return rc_nfq_get_physindev\n"
+"end\n"
+"\n"
+"-- method: get_physindev_name\n"
+"function _meth.nfq_data.get_physindev_name(self, handle)\n"
+"  \n"
+"  handle = obj_type_nlif_handle_check(handle)\n"
+"  local name_len = 63\n"
+"  local name = ffi.new(\"char[?]\", 64)\n"
+"  local rc_nfq_get_physindev_name\n"
+"  rc_nfq_get_physindev_name = C.nfq_get_physindev_name(handle, self, name)\n"
+"  if (-1 == rc_nfq_get_physindev_name) then\n"
+"    return nil\n"
+"  end\n"
+"  return ffi_string(name)\n"
 "end\n"
 "\n"
 "-- method: get_outdev\n"
@@ -2018,12 +2202,40 @@ static const char *netfilter_queue_ffi_lua_code[] = { "local ffi=require\"ffi\"\
 "  return rc_nfq_get_outdev\n"
 "end\n"
 "\n"
+"-- method: get_outdev_name\n"
+"function _meth.nfq_data.get_outdev_name(self, handle)\n"
+"  \n"
+"  handle = obj_type_nlif_handle_check(handle)\n"
+"  local name_len = 63\n"
+"  local name = ffi.new(\"char[?]\", 64)\n"
+"  local rc_nfq_get_outdev_name\n"
+"  rc_nfq_get_outdev_name = C.nfq_get_outdev_name(handle, self, name)\n"
+"  if (-1 == rc_nfq_get_outdev_name) then\n"
+"    return nil\n"
+"  end\n"
+"  return ffi_string(name)\n"
+"end\n"
+"\n"
 "-- method: get_physoutdev\n"
 "function _meth.nfq_data.get_physoutdev(self)\n"
 "  \n"
 "  local rc_nfq_get_physoutdev = 0\n"
 "  rc_nfq_get_physoutdev = C.nfq_get_physoutdev(self)\n"
 "  return rc_nfq_get_physoutdev\n"
+"end\n"
+"\n"
+"-- method: get_physoutdev_name\n"
+"function _meth.nfq_data.get_physoutdev_name(self, handle)\n"
+"  \n"
+"  handle = obj_type_nlif_handle_check(handle)\n"
+"  local name_len = 63\n"
+"  local name = ffi.new(\"char[?]\", 64)\n"
+"  local rc_nfq_get_physoutdev_name\n"
+"  rc_nfq_get_physoutdev_name = C.nfq_get_physoutdev_name(handle, self, name)\n"
+"  if (-1 == rc_nfq_get_physoutdev_name) then\n"
+"    return nil\n"
+"  end\n"
+"  return ffi_string(name)\n"
 "end\n"
 "\n"
 "_push.nfq_data = obj_type_nfq_data_push\n"
@@ -2142,7 +2354,7 @@ static int nfq_queue__destroy_queue__meth(lua_State *L) {
   nfq_queue_cb_state *wrap;
   int this_flags = 0;
   nfq_queue * this;
-  int rc_nfq_destroy_queue = 0;
+  err_rc rc_nfq_destroy_queue;
   this = obj_type_nfq_queue_delete(L,1,&(this_flags));
   if(!(this_flags & OBJ_UDATA_FLAG_OWN)) { return 0; }
   wrap = nobj_delete_callback_state(L, 1);
@@ -2150,8 +2362,13 @@ static int nfq_queue__destroy_queue__meth(lua_State *L) {
   luaL_unref(L, LUA_REGISTRYINDEX, wrap->func);
   }
   rc_nfq_destroy_queue = nfq_destroy_queue(this);
-  lua_pushinteger(L, rc_nfq_destroy_queue);
-  return 1;
+  /* check for error. */
+  if((-1 == rc_nfq_destroy_queue)) {
+    lua_pushnil(L);
+  } else {
+    lua_pushboolean(L, 1);
+  }
+  return 0;
 }
 
 /* method: set_mode */
@@ -2159,25 +2376,35 @@ static int nfq_queue__set_mode__meth(lua_State *L) {
   nfq_queue * this;
   uint8_t mode;
   uint32_t range;
-  int rc_nfq_set_mode = 0;
+  err_rc rc_nfq_set_mode;
   this = obj_type_nfq_queue_check(L,1);
   mode = luaL_checkinteger(L,2);
   range = luaL_checkinteger(L,3);
   rc_nfq_set_mode = nfq_set_mode(this, mode, range);
-  lua_pushinteger(L, rc_nfq_set_mode);
-  return 1;
+  /* check for error. */
+  if((-1 == rc_nfq_set_mode)) {
+    lua_pushnil(L);
+  } else {
+    lua_pushboolean(L, 1);
+  }
+  return 0;
 }
 
 /* method: set_queue_maxlen */
 static int nfq_queue__set_queue_maxlen__meth(lua_State *L) {
   nfq_queue * this;
   uint32_t queuelen;
-  int rc_nfq_set_queue_maxlen = 0;
+  err_rc rc_nfq_set_queue_maxlen;
   this = obj_type_nfq_queue_check(L,1);
   queuelen = luaL_checkinteger(L,2);
   rc_nfq_set_queue_maxlen = nfq_set_queue_maxlen(this, queuelen);
-  lua_pushinteger(L, rc_nfq_set_queue_maxlen);
-  return 1;
+  /* check for error. */
+  if((-1 == rc_nfq_set_queue_maxlen)) {
+    lua_pushnil(L);
+  } else {
+    lua_pushboolean(L, 1);
+  }
+  return 0;
 }
 
 /* method: set_verdict */
@@ -2185,18 +2412,21 @@ static int nfq_queue__set_verdict__meth(lua_State *L) {
   nfq_queue * this;
   uint32_t id;
   uint32_t verdict;
-  uint32_t data_len;
   size_t buf_len;
   const unsigned char * buf;
-  int rc_nfq_set_verdict = 0;
+  err_rc rc_nfq_set_verdict;
   this = obj_type_nfq_queue_check(L,1);
   id = luaL_checkinteger(L,2);
   verdict = luaL_checkinteger(L,3);
-  data_len = luaL_checkinteger(L,4);
-  buf = (unsigned char *)luaL_optlstring(L,5,NULL,&(buf_len));
-  rc_nfq_set_verdict = nfq_set_verdict(this, id, verdict, data_len, buf);
-  lua_pushinteger(L, rc_nfq_set_verdict);
-  return 1;
+  buf = (unsigned char *)luaL_optlstring(L,4,NULL,&(buf_len));
+  rc_nfq_set_verdict = nfq_set_verdict(this, id, verdict, buf_len, buf);
+  /* check for error. */
+  if((-1 == rc_nfq_set_verdict)) {
+    lua_pushnil(L);
+  } else {
+    lua_pushboolean(L, 1);
+  }
+  return 0;
 }
 
 /* method: set_verdict2 */
@@ -2205,19 +2435,22 @@ static int nfq_queue__set_verdict2__meth(lua_State *L) {
   uint32_t id;
   uint32_t verdict;
   uint32_t mark;
-  uint32_t data_len;
   size_t buf_len;
   const unsigned char * buf;
-  int rc_nfq_set_verdict2 = 0;
+  err_rc rc_nfq_set_verdict2;
   this = obj_type_nfq_queue_check(L,1);
   id = luaL_checkinteger(L,2);
   verdict = luaL_checkinteger(L,3);
   mark = luaL_checkinteger(L,4);
-  data_len = luaL_checkinteger(L,5);
-  buf = (unsigned char *)luaL_optlstring(L,6,NULL,&(buf_len));
-  rc_nfq_set_verdict2 = nfq_set_verdict2(this, id, verdict, mark, data_len, buf);
-  lua_pushinteger(L, rc_nfq_set_verdict2);
-  return 1;
+  buf = (unsigned char *)luaL_optlstring(L,5,NULL,&(buf_len));
+  rc_nfq_set_verdict2 = nfq_set_verdict2(this, id, verdict, mark, buf_len, buf);
+  /* check for error. */
+  if((-1 == rc_nfq_set_verdict2)) {
+    lua_pushnil(L);
+  } else {
+    lua_pushboolean(L, 1);
+  }
+  return 0;
 }
 
 /* callback: func */
@@ -2313,6 +2546,25 @@ static int nfq_data__get_indev__meth(lua_State *L) {
   return 1;
 }
 
+/* method: get_indev_name */
+static int nfq_data__get_indev_name__meth(lua_State *L) {
+  nfq_data * this;
+  nlif_handle * handle;
+  size_t name_len = 63;
+  char name_buf[64];
+  char * name = name_buf;
+  err_rc rc_nfq_get_indev_name;
+  this = obj_type_nfq_data_check(L,1);
+  handle = obj_type_nlif_handle_check(L,2);
+  rc_nfq_get_indev_name = nfq_get_indev_name(handle, this, name);
+  if(!(-1 == rc_nfq_get_indev_name)) {
+    lua_pushstring(L, name);
+  } else {
+    lua_pushnil(L);
+  }
+  return 1;
+}
+
 /* method: get_physindev */
 static int nfq_data__get_physindev__meth(lua_State *L) {
   nfq_data * this;
@@ -2320,6 +2572,25 @@ static int nfq_data__get_physindev__meth(lua_State *L) {
   this = obj_type_nfq_data_check(L,1);
   rc_nfq_get_physindev = nfq_get_physindev(this);
   lua_pushinteger(L, rc_nfq_get_physindev);
+  return 1;
+}
+
+/* method: get_physindev_name */
+static int nfq_data__get_physindev_name__meth(lua_State *L) {
+  nfq_data * this;
+  nlif_handle * handle;
+  size_t name_len = 63;
+  char name_buf[64];
+  char * name = name_buf;
+  err_rc rc_nfq_get_physindev_name;
+  this = obj_type_nfq_data_check(L,1);
+  handle = obj_type_nlif_handle_check(L,2);
+  rc_nfq_get_physindev_name = nfq_get_physindev_name(handle, this, name);
+  if(!(-1 == rc_nfq_get_physindev_name)) {
+    lua_pushstring(L, name);
+  } else {
+    lua_pushnil(L);
+  }
   return 1;
 }
 
@@ -2333,6 +2604,25 @@ static int nfq_data__get_outdev__meth(lua_State *L) {
   return 1;
 }
 
+/* method: get_outdev_name */
+static int nfq_data__get_outdev_name__meth(lua_State *L) {
+  nfq_data * this;
+  nlif_handle * handle;
+  size_t name_len = 63;
+  char name_buf[64];
+  char * name = name_buf;
+  err_rc rc_nfq_get_outdev_name;
+  this = obj_type_nfq_data_check(L,1);
+  handle = obj_type_nlif_handle_check(L,2);
+  rc_nfq_get_outdev_name = nfq_get_outdev_name(handle, this, name);
+  if(!(-1 == rc_nfq_get_outdev_name)) {
+    lua_pushstring(L, name);
+  } else {
+    lua_pushnil(L);
+  }
+  return 1;
+}
+
 /* method: get_physoutdev */
 static int nfq_data__get_physoutdev__meth(lua_State *L) {
   nfq_data * this;
@@ -2340,6 +2630,25 @@ static int nfq_data__get_physoutdev__meth(lua_State *L) {
   this = obj_type_nfq_data_check(L,1);
   rc_nfq_get_physoutdev = nfq_get_physoutdev(this);
   lua_pushinteger(L, rc_nfq_get_physoutdev);
+  return 1;
+}
+
+/* method: get_physoutdev_name */
+static int nfq_data__get_physoutdev_name__meth(lua_State *L) {
+  nfq_data * this;
+  nlif_handle * handle;
+  size_t name_len = 63;
+  char name_buf[64];
+  char * name = name_buf;
+  err_rc rc_nfq_get_physoutdev_name;
+  this = obj_type_nfq_data_check(L,1);
+  handle = obj_type_nlif_handle_check(L,2);
+  rc_nfq_get_physoutdev_name = nfq_get_physoutdev_name(handle, this, name);
+  if(!(-1 == rc_nfq_get_physoutdev_name)) {
+    lua_pushstring(L, name);
+  } else {
+    lua_pushnil(L);
+  }
   return 1;
 }
 
@@ -2428,9 +2737,13 @@ static const luaL_reg obj_nfq_data_methods[] = {
   {"get_nfmark", nfq_data__get_nfmark__meth},
   {"get_timestamp", nfq_data__get_timestamp__meth},
   {"get_indev", nfq_data__get_indev__meth},
+  {"get_indev_name", nfq_data__get_indev_name__meth},
   {"get_physindev", nfq_data__get_physindev__meth},
+  {"get_physindev_name", nfq_data__get_physindev_name__meth},
   {"get_outdev", nfq_data__get_outdev__meth},
+  {"get_outdev_name", nfq_data__get_outdev_name__meth},
   {"get_physoutdev", nfq_data__get_physoutdev__meth},
+  {"get_physoutdev_name", nfq_data__get_physoutdev_name__meth},
   {NULL, NULL}
 };
 
